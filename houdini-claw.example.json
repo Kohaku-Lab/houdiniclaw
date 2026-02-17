@@ -1,0 +1,58 @@
+{
+  "$schema": "https://docs.openclaw.ai/schema/config.json",
+  "_comment": "Houdini Claw configuration — copy to ~/.openclaw/openclaw.json and fill in your values",
+
+  "identity": {
+    "name": "Houdini Claw",
+    "emoji": "🔥"
+  },
+
+  "agents": {
+    "default": {
+      "model": "claude-opus-4-6",
+      "thinking": "high",
+      "identity": {
+        "name": "Houdini Claw",
+        "emoji": "🔥"
+      },
+      "systemPromptSuffix": "You are Houdini Claw, a senior Houdini TD assistant. Read SOUL.md for your full persona. Always search the knowledge base before answering Houdini questions."
+    }
+  },
+
+  "skills": {
+    "bundled": {
+      "allow": [
+        "houdini-doc-query",
+        "houdini-recipe",
+        "houdini-diagnose",
+        "houdini-param-advisor",
+        "houdini-annotator"
+      ]
+    }
+  },
+
+  "cron": [
+    {
+      "id": "houdini-annotator-weekly",
+      "schedule": "0 3 * * 0",
+      "message": "Run the full Houdini annotation pipeline. Use the houdini-annotator skill. Mode: full.",
+      "model": "gpt-5.2-xhigh",
+      "thinking": "xhigh"
+    },
+    {
+      "id": "houdini-annotator-daily",
+      "schedule": "0 4 * * 1-6",
+      "message": "Run the incremental Houdini annotation pipeline. Use the houdini-annotator skill. Mode: incremental.",
+      "model": "gpt-5.2-xhigh",
+      "thinking": "high"
+    }
+  ],
+
+  "_env_notes": {
+    "OPENAI_API_KEY": "Required for annotation pipeline (GPT-5.2 xhigh) and embeddings",
+    "ANTHROPIC_API_KEY": "Required for Claude Opus 4.6 (frontend answering model)",
+    "HOUDINI_CLAW_DB_PATH": "Optional, defaults to ~/.openclaw/houdini-claw/houdini_kb.db",
+    "HOUDINI_CLAW_EMBEDDING_MODEL": "Optional, defaults to text-embedding-3-small",
+    "HOUDINI_CLAW_ANNOTATION_MODEL": "Optional, defaults to gpt-5.2-xhigh"
+  }
+}
