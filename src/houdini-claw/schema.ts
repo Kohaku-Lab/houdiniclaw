@@ -183,6 +183,48 @@ CREATE TABLE IF NOT EXISTS coverage_report (
 
   UNIQUE(system, report_date)
 );
+
+-- HIP file index: tracks discovered and parsed .hip files
+CREATE TABLE IF NOT EXISTS hip_files (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  file_name       TEXT NOT NULL,
+  file_hash       TEXT NOT NULL UNIQUE,
+  source          TEXT NOT NULL,          -- content_library, local_install, sidefx_examples, community
+  source_url      TEXT,
+  houdini_version TEXT,
+  description     TEXT,
+  systems         TEXT,                   -- JSON array: ["pyro", "rbd"]
+  node_count      INTEGER NOT NULL DEFAULT 0,
+  parsed_at       TEXT,
+  parse_status    TEXT NOT NULL DEFAULT 'pending',  -- pending, success, error, skipped
+  parse_error     TEXT,
+
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_hip_files_hash ON hip_files(file_hash);
+CREATE INDEX IF NOT EXISTS idx_hip_files_source ON hip_files(source);
+CREATE INDEX IF NOT EXISTS idx_hip_files_status ON hip_files(parse_status);
+
+-- HIP parameter snapshots: actual parameter values extracted from .hip files
+CREATE TABLE IF NOT EXISTS hip_parameter_snapshots (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  hip_file_id     INTEGER NOT NULL,
+  node_type       TEXT NOT NULL,          -- e.g., pyrosolver::2.0
+  node_path       TEXT NOT NULL,          -- e.g., /obj/pyro_sim/pyro_solver1
+  param_name      TEXT NOT NULL,
+  param_value     TEXT NOT NULL,          -- JSON-encoded value
+  is_default      INTEGER NOT NULL DEFAULT 0,
+  expression      TEXT,                   -- VEX/HScript expression if any
+
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+
+  FOREIGN KEY (hip_file_id) REFERENCES hip_files(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hip_snapshots_type ON hip_parameter_snapshots(node_type);
+CREATE INDEX IF NOT EXISTS idx_hip_snapshots_param ON hip_parameter_snapshots(param_name);
+CREATE INDEX IF NOT EXISTS idx_hip_snapshots_file ON hip_parameter_snapshots(hip_file_id);
 `;
 
 /** SQL to create the sqlite-vec virtual table for vector search. */

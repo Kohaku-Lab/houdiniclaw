@@ -544,4 +544,222 @@ export class KnowledgeBase {
     `);
     return stmt.all() as Array<Record<string, unknown>>;
   }
+
+  // ── HIP Files ──────────────────────────────────────────────
+
+  upsertHipFile(data: {
+    file_name: string;
+    file_hash: string;
+    source: string;
+    source_url?: string;
+    houdini_version?: string;
+    description?: string;
+    systems?: string[];
+    node_count?: number;
+    parsed_at?: string;
+    parse_status?: string;
+    parse_error?: string;
+  }): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO hip_files (
+        file_name, file_hash, source, source_url,
+        houdini_version, description, systems, node_count,
+        parsed_at, parse_status, parse_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_hash) DO UPDATE SET
+        file_name = excluded.file_name,
+        source = excluded.source,
+        source_url = excluded.source_url,
+        houdini_version = excluded.houdini_version,
+        description = excluded.description,
+        systems = excluded.systems,
+        node_count = excluded.node_count,
+        parsed_at = excluded.parsed_at,
+        parse_status = excluded.parse_status,
+        parse_error = excluded.parse_error
+    `);
+    const result = stmt.run(
+      data.file_name,
+      data.file_hash,
+      data.source,
+      data.source_url ?? null,
+      data.houdini_version ?? null,
+      data.description ?? null,
+      data.systems ? JSON.stringify(data.systems) : null,
+      data.node_count ?? 0,
+      data.parsed_at ?? null,
+      data.parse_status ?? "pending",
+      data.parse_error ?? null,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  getHipFile(fileHash: string): Record<string, unknown> | undefined {
+    const stmt = this.db.prepare(
+      "SELECT * FROM hip_files WHERE file_hash = ?",
+    );
+    return stmt.get(fileHash) as Record<string, unknown> | undefined;
+  }
+
+  listHipFiles(options?: {
+    source?: string;
+    parseStatus?: string;
+  }): Array<Record<string, unknown>> {
+    if (options?.source && options?.parseStatus) {
+      const stmt = this.db.prepare(
+        "SELECT * FROM hip_files WHERE source = ? AND parse_status = ? ORDER BY created_at DESC",
+      );
+      return stmt.all(options.source, options.parseStatus) as Array<Record<string, unknown>>;
+    }
+    if (options?.source) {
+      const stmt = this.db.prepare(
+        "SELECT * FROM hip_files WHERE source = ? ORDER BY created_at DESC",
+      );
+      return stmt.all(options.source) as Array<Record<string, unknown>>;
+    }
+    if (options?.parseStatus) {
+      const stmt = this.db.prepare(
+        "SELECT * FROM hip_files WHERE parse_status = ? ORDER BY created_at DESC",
+      );
+      return stmt.all(options.parseStatus) as Array<Record<string, unknown>>;
+    }
+    const stmt = this.db.prepare(
+      "SELECT * FROM hip_files ORDER BY created_at DESC",
+    );
+    return stmt.all() as Array<Record<string, unknown>>;
+  }
+
+  // ── HIP Parameter Snapshots ────────────────────────────────
+
+  insertParameterSnapshot(data: {
+    hip_file_id: number;
+    node_type: string;
+    node_path: string;
+    param_name: string;
+    param_value: string;
+    is_default?: boolean;
+    expression?: string;
+  }): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO hip_parameter_snapshots (
+        hip_file_id, node_type, node_path, param_name,
+        param_value, is_default, expression
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      data.hip_file_id,
+      data.node_type,
+      data.node_path,
+      data.param_name,
+      data.param_value,
+      data.is_default ? 1 : 0,
+      data.expression ?? null,
+    );
+  }
+
+  /**
+   * Bulk insert parameter snapshots for a HIP file.
+   */
+  insertParameterSnapshots(
+    hipFileId: number,
+    snapshots: Array<{
+      node_type: string;
+      node_path: string;
+      param_name: string;
+      param_value: string;
+      is_default?: boolean;
+      expression?: string;
+    }>,
+  ): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO hip_parameter_snapshots (
+        hip_file_id, node_type, node_path, param_name,
+        param_value, is_default, expression
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const snap of snapshots) {
+      stmt.run(
+        hipFileId,
+        snap.node_type,
+        snap.node_path,
+        snap.param_name,
+        snap.param_value,
+        snap.is_default ? 1 : 0,
+        snap.expression ?? null,
+      );
+    }
+  }
+
+  getSnapshotsForNodeType(
+    nodeType: string,
+  ): Array<Record<string, unknown>> {
+    const stmt = this.db.prepare(
+      "SELECT * FROM hip_parameter_snapshots WHERE node_type = ? ORDER BY param_name",
+    );
+    return stmt.all(nodeType) as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Aggregate parameter statistics across all HIP files for a given node type.
+   * Returns min, max, avg, and count for each parameter.
+   */
+  getParameterStatistics(
+    nodeType: string,
+    paramName?: string,
+  ): Array<Record<string, unknown>> {
+    let sql = `
+      SELECT
+        param_name,
+        COUNT(*) as sample_count,
+        MIN(CAST(param_value AS REAL)) as min_value,
+        MAX(CAST(param_value AS REAL)) as max_value,
+        AVG(CAST(param_value AS REAL)) as avg_value,
+        SUM(CASE WHEN is_default = 0 THEN 1 ELSE 0 END) as modified_count
+      FROM hip_parameter_snapshots
+      WHERE node_type = ?
+        AND typeof(param_value) != 'text'
+        OR (param_value GLOB '[0-9]*' OR param_value GLOB '-[0-9]*' OR param_value GLOB '[0-9]*.[0-9]*')
+    `;
+    const params: unknown[] = [nodeType];
+
+    if (paramName) {
+      sql += " AND param_name = ?";
+      params.push(paramName);
+    }
+
+    sql += " GROUP BY param_name ORDER BY sample_count DESC";
+
+    const stmt = this.db.prepare(sql);
+    return stmt.all(...params) as Array<Record<string, unknown>>;
+  }
+
+  /**
+   * Clear all parameter snapshots for a specific HIP file.
+   */
+  clearSnapshotsForHipFile(hipFileId: number): void {
+    this.db.prepare(
+      "DELETE FROM hip_parameter_snapshots WHERE hip_file_id = ?",
+    ).run(hipFileId);
+  }
+
+  /**
+   * Get HIP coverage report: how many files parsed per system.
+   */
+  getHipCoverageReport(): Array<Record<string, unknown>> {
+    const stmt = this.db.prepare(`
+      SELECT
+        json_each.value as system,
+        COUNT(DISTINCT hf.id) as total_files,
+        SUM(CASE WHEN hf.parse_status = 'success' THEN 1 ELSE 0 END) as parsed_files,
+        SUM(hf.node_count) as total_nodes,
+        (SELECT COUNT(*) FROM hip_parameter_snapshots hps
+         WHERE hps.hip_file_id IN (SELECT id FROM hip_files)
+        ) as total_snapshots
+      FROM hip_files hf, json_each(hf.systems)
+      GROUP BY json_each.value
+      ORDER BY json_each.value
+    `);
+    return stmt.all() as Array<Record<string, unknown>>;
+  }
 }

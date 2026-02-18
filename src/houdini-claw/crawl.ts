@@ -22,7 +22,7 @@ interface CrawlSource {
   enabled: boolean;
 }
 
-interface CrawledPage {
+export interface CrawledPage {
   url: string;
   sourceType: string;
   nodeName?: string;
@@ -30,6 +30,10 @@ interface CrawledPage {
   content: string;
   contentHash: string;
   crawledAt: string;
+  /** Names of associated example HIP files discovered on the page */
+  exampleFiles?: string[];
+  /** URLs for downloading associated HIP/asset files */
+  exampleUrls?: string[];
 }
 
 // ── Source Configuration ───────────────────────────────────
@@ -302,6 +306,215 @@ export async function runCrawl(options: {
   }
 
   return results;
+}
+
+// ── Examples Page Crawler ─────────────────────────────────
+
+/**
+ * Map a node doc path to its corresponding examples page URL.
+ * SideFX examples URL pattern: /docs/houdini/examples/nodes/{type}/{name}.html
+ */
+function nodePathToExamplesUrl(nodePath: string): string {
+  // nodePath format: "nodes/dop/pyrosolver" → examples URL: "examples/nodes/dop/pyrosolver.html"
+  return `https://www.sidefx.com/docs/houdini/examples/${nodePath}.html`;
+}
+
+/**
+ * Crawl the SideFX examples page for a node and extract example file references.
+ */
+export async function crawlNodeExamples(
+  nodePath: string,
+): Promise<CrawledPage | null> {
+  const url = nodePathToExamplesUrl(nodePath);
+  const nodeName = nodePath.split("/").pop() ?? nodePath;
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "HoudiniClaw/1.0 (knowledge-base-builder)",
+        Accept: "text/html",
+      },
+    });
+
+    if (!response.ok) {
+      // Many nodes don't have example pages — this is expected
+      if (response.status !== 404) {
+        console.warn(`[crawl-examples] HTTP ${response.status} for ${url}`);
+      }
+      return null;
+    }
+
+    const html = await response.text();
+    const content = extractDocContent(html);
+    const contentHash = crypto.createHash("sha256").update(content).digest("hex");
+
+    // Extract references to .hip / .hipnc files from the page
+    const exampleFiles = extractExampleFileNames(html);
+    const exampleUrls = extractExampleDownloadUrls(html, url);
+
+    return {
+      url,
+      sourceType: "sidefx_examples",
+      nodeName,
+      title: extractTitle(html) ?? `${nodeName} examples`,
+      content,
+      contentHash,
+      crawledAt: new Date().toISOString(),
+      exampleFiles: exampleFiles.length > 0 ? exampleFiles : undefined,
+      exampleUrls: exampleUrls.length > 0 ? exampleUrls : undefined,
+    };
+  } catch (err) {
+    console.error(`[crawl-examples] Failed to fetch ${url}:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Extract .hip/.hipnc file names referenced in an HTML page.
+ */
+function extractExampleFileNames(html: string): string[] {
+  const names: string[] = [];
+  // Match .hip or .hipnc filenames in text, links, and code blocks
+  const pattern = /[\w/.-]+\.hipn?c?\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(html)) !== null) {
+    const name = match[0];
+    if (name.endsWith(".hip") || name.endsWith(".hipnc")) {
+      if (!names.includes(name)) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Extract download URLs for example files from an HTML page.
+ */
+function extractExampleDownloadUrls(html: string, pageUrl: string): string[] {
+  const urls: string[] = [];
+  // Match href attributes pointing to .hip files
+  const hrefPattern = /href=["']([^"']*\.hipn?c?)["']/gi;
+  let match: RegExpExecArray | null;
+  while ((match = hrefPattern.exec(html)) !== null) {
+    let href = match[1];
+    // Resolve relative URLs
+    if (!href.startsWith("http")) {
+      try {
+        href = new URL(href, pageUrl).toString();
+      } catch {
+        continue;
+      }
+    }
+    if (!urls.includes(href)) {
+      urls.push(href);
+    }
+  }
+  return urls;
+}
+
+/**
+ * Crawl the SideFX examples index page to discover all available examples.
+ */
+export async function crawlExamplesIndex(
+  baseUrl: string = "https://www.sidefx.com/docs/houdini/examples/",
+): Promise<Array<{ name: string; path: string; category: string }>> {
+  const examples: Array<{ name: string; path: string; category: string }> = [];
+
+  try {
+    const response = await fetch(`${baseUrl}index.html`, {
+      headers: {
+        "User-Agent": "HoudiniClaw/1.0 (knowledge-base-builder)",
+        Accept: "text/html",
+      },
+    });
+
+    if (!response.ok) {
+      console.warn(`[crawl-examples] Failed to fetch examples index: HTTP ${response.status}`);
+      return examples;
+    }
+
+    const html = await response.text();
+
+    // Extract links to example pages
+    // Pattern: href="nodes/{type}/{name}.html" or similar
+    const linkPattern = /href=["'](?:\.\/)?(?:nodes\/)?(\w+)\/(\w+)\.html["']/gi;
+    let match: RegExpExecArray | null;
+    while ((match = linkPattern.exec(html)) !== null) {
+      const category = match[1];
+      const name = match[2];
+      examples.push({
+        name,
+        path: `nodes/${category}/${name}`,
+        category,
+      });
+    }
+  } catch (err) {
+    console.error("[crawl-examples] Failed to fetch examples index:", (err as Error).message);
+  }
+
+  return examples;
+}
+
+/**
+ * Run a crawl that includes both documentation pages and their example pages.
+ */
+export async function runCrawlWithExamples(options: {
+  mode: "full" | "incremental";
+  outputDir: string;
+  systems?: string[];
+  includeExamples?: boolean;
+  onProgress?: (fetched: number, total: number, nodeName: string) => void;
+}): Promise<CrawledPage[]> {
+  // First run the standard doc crawl
+  const docResults = await runCrawl(options);
+
+  if (options.includeExamples === false) {
+    return docResults;
+  }
+
+  // Then crawl example pages for each node
+  const targetSystems = options.systems ?? Object.keys(ALL_NODE_PATHS);
+  const allPaths: Array<{ system: string; path: string }> = [];
+
+  for (const system of targetSystems) {
+    const paths = ALL_NODE_PATHS[system];
+    if (paths) {
+      for (const p of paths) {
+        allPaths.push({ system, path: p });
+      }
+    }
+  }
+
+  const exampleResults: CrawledPage[] = [];
+  const total = allPaths.length;
+  let fetched = 0;
+
+  for (const { system, path: nodePath } of allPaths) {
+    const nodeName = nodePath.split("/").pop() ?? nodePath;
+    const outputFile = path.join(options.outputDir, `${system}--${nodeName}--examples.json`);
+
+    // In incremental mode, skip if we already have this
+    if (options.mode === "incremental" && fs.existsSync(outputFile)) {
+      fetched++;
+      options.onProgress?.(fetched, total, `${nodeName} (examples)`);
+      continue;
+    }
+
+    const page = await crawlNodeExamples(nodePath);
+    if (page) {
+      fs.writeFileSync(outputFile, JSON.stringify(page, null, 2));
+      exampleResults.push(page);
+    }
+
+    fetched++;
+    options.onProgress?.(fetched, total, `${nodeName} (examples)`);
+
+    // Rate limit
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  return [...docResults, ...exampleResults];
 }
 
 // ── CLI Entry Point ────────────────────────────────────────

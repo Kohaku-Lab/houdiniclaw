@@ -19,6 +19,8 @@ interface AnnotationRequest {
   system: string;
   rawDoc: string;
   sourceUrl: string;
+  /** Optional HIP file analysis summary to inject into the prompt */
+  hipDataSummary?: string;
 }
 
 interface AnnotationResult {
@@ -88,7 +90,11 @@ interface ErrorPatternData {
 
 // ── Annotation Prompt ──────────────────────────────────────
 
-function buildAnnotationPrompt(request: AnnotationRequest): string {
+function buildAnnotationPrompt(request: AnnotationRequest, hipDataSummary?: string): string {
+  const hipSection = hipDataSummary
+    ? `\n## Real-World Parameter Data (from official example HIP files):\n${hipDataSummary}\n\nUse this data to calibrate your safe_range and expert_range values. The actual usage ranges from HIP files should inform your annotations — if official examples use dissipation values from 0.01 to 0.5, reflect that in your ranges.\n`
+    : "";
+
   return `You are a senior Houdini Technical Director. Based on the following official documentation, generate a comprehensive structured annotation for the "${request.nodeName}" node.
 
 System category: ${request.system}
@@ -96,6 +102,7 @@ Source URL: ${request.sourceUrl}
 
 ## Raw Documentation:
 ${request.rawDoc}
+${hipSection}
 
 ## Output Requirements
 
@@ -210,7 +217,7 @@ export async function annotateNode(
     throw new Error("No API key for annotation. Set OPENAI_API_KEY.");
   }
 
-  const prompt = buildAnnotationPrompt(request);
+  const prompt = buildAnnotationPrompt(request, request.hipDataSummary);
 
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
